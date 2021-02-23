@@ -1,0 +1,39 @@
+<style>
+h1 {
+  # border: 1.5px solid #333;
+  padding: 15px 15px;
+  # background-image: linear-gradient(180deg, #fff, rgb(160, 147, 147));
+  background-color: #00A19C;
+  color: #FFFFFF;
+  position: static;
+}
+
+h2 {
+	padding: 15px 15px;
+	color: #00746E;
+	position: static;
+}
+
+div.warn {    
+    background-color: #fcf2f2;
+    border-color: #dFb5b4;
+    border-left: 5px solid #dfb5b4;
+    padding: 0.5em;
+    }
+	
+.rise-enabled .reveal .slides h1
+ {
+    color: white;
+	padding-top: 15px;
+	padding-bottom: 15px;
+ }
+ .rise-enabled .reveal .slides h2
+ {
+    color: #00746E;
+ }
+ .rise-enabled .reveal .slides p.output_subarea>pre
+ {
+    color: black;
+ }
+ 
+</style>
