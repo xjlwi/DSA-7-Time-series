@@ -14,6 +14,12 @@ h2 {
 	position: static;
 }
 
+h3 {
+	padding: 15px 15px;
+	color: #9F79B7;
+	position: static;
+}
+
 div.warn {    
     background-color: #fcf2f2;
     border-color: #dFb5b4;
@@ -30,6 +36,10 @@ div.warn {
  .rise-enabled .reveal .slides h2
  {
     color: #00746E;
+ }
+ .rise-enabled .reveal .slides h3
+ {
+    color: #9F79B7;
  }
  .rise-enabled .reveal .slides p.output_subarea>pre
  {
