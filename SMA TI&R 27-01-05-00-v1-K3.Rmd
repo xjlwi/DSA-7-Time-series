@@ -1,0 +1,345 @@
+---
+title: "Time Series multivariate forecast"
+author: "Crystal Lwi"
+date: "02/09/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Time Series Analysis
+
+This is a sample code that was implemented to demonstrate ability to perform multivariate time-series data.
+
+```{r Subset data frame, Train Test Multivariate data}
+## Select by start Train, Test date and Columns x + y
+prepMonthlyData <- function (monthly_data, set, start_train_date, end_test_date, crude = CRUDE, 
+                             featuresSelected = featuresSelected){
+    if (crude == "diff"){
+        crude_column <- "crude_diff"
+    }else{
+        crude_column <- paste0(as.character(crude), "_crude")
+    }
+    if (sum(grepl("DateTime" , names(monthly_data)) >= 1)){
+        monthly_data <- monthly_data %>% rename(Date = DateTime)
+    }
+    monthly_data_prep <- monthly_data %>% 
+        # Filter Train Test date
+        filter(Date >= start_train_date[set], Date <= end_test_date[set])%>% 
+        arrange(Date) %>% 
+        # Select target + predictor columns
+        select(!!rlang::sym(crude_column), one_of(featuresSelected)) 
+    
+    return (monthly_data_prep)
+}
+```
+
+## Multivariate model using Linear model.
+
+We implement a fitControl basis a time-series cross validation method. We also used an existing `timetk` library method to prepare our lagging dataframes.
+
+The horizons are hard-coded to basically say we are forecasting up to 12-horizons. Lookback is to enable model to use lag variables during the model fitting process.
+
+Model fitting is done in this example with the implementation of `caret` package.
+
+Since there was scaling done during model-fitting, we then inverse the predictions using scaled values with the `invertScale` function.
+
+```{r Multivariate model}
+model_functionLMv2 <- function (data_df, fitControl, date_range, crude = CRUDE,
+                                featuresSelected, YEAR){
+    #' This function splits data_df into train and test, lags the dataframe.
+    #' This is function to train lag 12 months data with XGBoost model.
+    #'@param data_df = Monthly Data with y and x-vars no lag that has been subset according to the right 
+    #'                 end test date
+    #'@param fitControl = Cross validation tuning for Boosted LM Model
+    #'@param date_range = Test start date for predictions table
+    #'@param crude = String indicating target_variable in data_df (e.g. "brent"/"dubai")
+    #'@param featuresSelected = vector of column names to be included as x-vars in the model.
+    #'@param YEAR = 2019/ 2020
+    #'@return list(train_data, test_data, model_fit, predictions)
+    
+    ptm <- proc.time()
+    ## Select x-vars
+    crude_column <- paste0(as.character(crude), "_crude")
+    trainSet <- data_df %>% 
+        select(!!rlang::sym(crude_column), one_of(featuresSelected)) %>% as.data.frame()
+    
+    ## Customise horizons and lookback
+    horizons <- 12 # Forecast M1, M2...M12
+    lookback <- 1:12 # lag months
+    
+    ## Lag Train Test Set
+    data_train <- create_lagged_df(trainSet, type = "train", method = "direct",
+                                   outcome_col = 1, lookback = lookback, 
+                                   horizons = horizons)
+    lag12_df <- data_train[[1]]
+    data_test <- create_lagged_df(trainSet, type = "forecast", method = "direct",
+                                  outcome_col = 1, horizons = horizons, 
+                                  lookback = lookback)
+    lag12_df_test <- data_test[[1]]
+    
+    ## Scale Train, Scale Test
+    train_x <- lag12_df %>% minmax_scaling()
+    test_x <- lag12_df_test %>% select(one_of(names(train_x))) %>% minmax_scaling()
+    
+    ## Get Min Max Values
+    min_y <- lag12_df %>% select(!!rlang::sym(crude_column)) %>% min(.)
+    max_y <- lag12_df %>% select(!!rlang::sym(crude_column)) %>% max(.)
+    
+    print (paste("Training using Linear Model for", date_range, "as M0..."))
+    set.seed(123)
+    ## Fitting into Linear Model
+    model_lm <- caret::train(as.formula(paste0(crude_column, "~.")),
+                             train_x,
+                             method = "lm", 
+                             trControl= fitControl)
+    
+    ## Saving model to RDS file
+    saveRDS(model_lm, paste0("../data/output/Linear Model/Models/LM", tools::toTitleCase(crude), "Crude_ModelLag",
+                          max(horizons), "v4_", month.abb[month(date_range)], YEAR, ".RDS"))
+    
+    ## 2019 Rolling Predict on Test Set
+    if (YEAR == 2019){
+        predicted <- invertScale(predictions = predict(model_lm, test_x),
+                                 min_y = min_y, max_y = max_y)
+        predictions <- data.frame("y_test" = round(predicted, 2)) %>% 
+            mutate(DateTime = seq_monthly(as.Date(date_range), nrow(.)),
+                   forecast = paste("M", row_number()-1, sep = ""))
+    }else{
+        ## 2020 Rolling Predictions on Test Set
+        predicted <- invertScale(predictions = predict(model_lm, test_x),
+                                 min_y = min_y, max_y = max_y)
+        predictions <- data.frame("y_test" = round(predicted, 2)) %>% 
+            mutate(DateTime = seq_monthly(as.Date(date_range), nrow(.)),
+                   forecast = paste("M", row_number()-1, sep = ""))  
+    }
+    print (proc.time() - ptm)
+    gc()
+    
+    return (list("train_data" = lag12_df, 
+                 "test_data"= lag12_df_test, 
+                 "model" = model_lm,
+                 "results" = predictions))
+}
+
+```
+
+An advanced version of implementation of the workflow is then designed using `recipes and workflow.`
+
+    MonthlyM0M5Crudev5j <- function(all_features_merged, CRUDE){
+      #'@param    all_features_merged [dataframe] Monthly dataframe, x-y features column.
+      #'@param    CRUDE [str] Vector of length 1 ("brent" or "dubai")
+      #'@return The monthly forecast value.
+      
+      #'--- Training, Testing Date
+      length <- length(seq(from=as.Date("2019-01-01"), to=Sys.Date(), by='month'))
+      start_train_date <- seq_monthly(as.Date("2014-01-01"), length = length) # Can select for different year
+      end_test_date <- seq_monthly(as.Date("2018-12-31"), length = length)
+      date_range <- seq_monthly(as.Date("2019-01-01"), length = length)
+      crudeCol <- paste(CRUDE, "crude", sep = "_")
+      CRACK <- ""
+      featuresSelected <- get_features(model_version = "v5j")
+      
+      # Include / excluding Lag of crude prices as x-var.
+      LAGCRUDE <- FALSE
+      FORWARDFLAG <- TRUE
+      forecast_horizon <- 6
+      
+      all_features_merged <- all_features_merged %>% 
+        dplyr::select(date_time, one_of(crudeCol), all_of(featuresSelected)) %>% 
+        dplyr::mutate(us_stocks_eia4 = us_stocks_eia4 / 1E4)
+      checkModelInput(all_features_merged, featuresSelected = featuresSelected, crudeCol = crudeCol)
+      
+      #'--- Model Training, Testing
+      cl <- makeCluster(4)
+      registerDoSNOW(cl = cl)
+      pb <- txtProgressBar(min = 1, max = length(date_range), style = 3)
+      progress <- function(n) setTxtProgressBar(pb, n)
+      opts <- list(progress=progress)
+      start_time <- Sys.time()
+      
+      Crudev5jList <-  foreach(i = length(date_range),#1:(length(date_range)), 
+                               .packages = c("dplyr", "ggplot2","purrr","here","lubridate","tidyr",
+                                             "forecastML", "recipes", "timetk", "rsample", "workflows", 
+                                             "parsnip", "modeltime", "mltools", "glue", "aws.s3"),
+                               .options.snow=opts) %dopar%{
+             
+           ## source for required functions
+           source(paste0(here::here(),"/raphael/modelling/crude/monthly/02_Main_ModelFunctions.R"))
+           
+           ## Rolling Train, Test
+           crudeCol <- paste0(CRUDE, "_crude")
+           
+           set <- i
+           master_df <- prepMonthlyData(all_features_merged, start_train_date = start_train_date,
+                                        end_train_date = end_test_date, set = set,
+                                        featuresSelected = featuresSelected, CRUDE = CRUDE, CRACK = CRACK,
+                                        include_date = T, rollingFlag = T)
+           
+           master_df_noDate <- prepMonthlyData(all_features_merged, start_train_date = start_train_date,
+                                               end_train_date = end_test_date, set = set,
+                                               featuresSelected = featuresSelected, CRUDE = CRUDE, CRACK = CRACK,
+                                               include_date = F, rollingFlag = T)
+           n <- forecast_horizon + 1
+           lookback <- horizons <- forecast_horizon
+           
+           # '--Step 1. Split Data set into Training and Testing with lag ----
+           ## train set with lag columns
+           data_train <- forecastML::create_lagged_df(master_df_noDate, type = "train", method = "direct",
+                                                      outcome_col = 1, lookback = lookback,
+                                                      horizons = horizons)
+           lag6_df <- data_train[[1]] 
+           lag6_df_Date <- lag6_df %>% 
+             dplyr::mutate(master_df %>% slice(n = n:nrow(.)) %>% select(Date),
+                           Date = seq_monthly(Date[[1]], nrow(.)))
+           
+           
+           ## test set with lag columns
+           data_test <- forecastML::create_lagged_df(master_df_noDate, type = "forecast", method = "direct",
+                                                     outcome_col = 1, horizons = horizons,
+                                                     lookback = lookback)
+           lag6_df_test <- data_test[[1]] 
+           lag6_df_testDate <- lag6_df_test %>% 
+             dplyr::mutate(master_df %>% slice_tail(n = forecast_horizon) %>% select(Date),
+                           Date = seq_monthly(Date[[forecast_horizon]] %m+% months(1), forecast_horizon))
+           
+           if (LAGCRUDE == F){
+             print ("Removing lag crude")
+             # Remove lag_6 of crude prices
+             lag6_df <- lag6_df[-2]
+             lag6_df_Date <- lag6_df_Date [-2]
+             lag6_df_test <- lag6_df_test [-3]
+             lag6_df_testDate <- lag6_df_testDate[-3]
+           }
+           
+           
+           # '--Step 2. Add time series signature ----
+           ## Create additional date features here. Arima_boost model needs to take in the train data with 
+           ## 'Date' column. Change the recipe here to your target colname.
+           formula_recipe <- as.formula(paste0(crudeCol,"~."))
+           recipe_spec_timeseries <- recipe(formula_recipe, data = lag6_df_Date)%>%
+             step_dummy(contains("month.lbl"), one_hot = TRUE)
+           recipe_spec_final <- prep(recipe_spec_timeseries, verbose = T)  
+           
+           
+           ## To automate formula
+           recipe2 <- recipe(formula_recipe, 
+                             data = lag6_df) #lag 12 df is without datetimes.
+           recipe_spec_final2 <- recipe2 
+           
+           
+           # '--Step 3. Set up Recipe for Model ----
+           # Model 1: arima_boost 
+           model_fit_arima_boosted <- arima_boost(
+             min_n = 30,
+             learn_rate = 0.015,
+             mtry = 4,
+             trees = 100,
+             tree_depth = 3
+           ) %>%
+             set_engine(engine = "auto_arima_xgboost") 
+           
+           # Model 2: Random Forest
+           model_fit_rf <-  
+             rand_forest(trees = 100, mtry = length(featuresSelected) / 2) %>% 
+             set_engine("randomForest") %>% 
+             set_mode("regression")
+           
+           # Model 3: Arima-X
+           model_fit_arima_reg <- 
+             arima_reg(mode = "regression") %>% 
+             set_engine("auto_arima")
+           
+           set.seed(345)
+           
+           # A. Modelling with Workflow 
+           wflow_fit_arimaboost <- workflow() %>% 
+             add_model(model_fit_arima_boosted) %>% 
+             add_recipe(recipe_spec_final)
+           
+           wflw_fit_rf <- workflow() %>%
+             add_model(model_fit_rf) %>%
+             add_recipe(recipe_spec_final2)
+           
+           # B. Fit train
+           crude_arimaxg_fit <- 
+             wflow_fit_arimaboost %>% 
+             fit(data = lag6_df_Date)
+           
+           crude_rf_fit <- wflw_fit_rf %>% 
+             fit( data = lag6_df)
+           
+           crude_arimareg_fit <- model_fit_arima_reg %>% 
+             fit(formula_recipe,
+                 data = lag6_df_Date)
+           
+           
+           forecastMonth <- paste0(month.abb[month(date_range[set])], year(date_range[set]))
+           
+           list_of_models <- list(crude_arimaxg_fit, crude_rf_fit, crude_arimareg_fit)
+           
+           }
+      end_time <- round(difftime(Sys.time(), start_time, units = "min"), 2)
+      flog.info (glue::glue("\t Time taken for model v5j training: {end_time} min"))
+      stopCluster(cl)
+      
+      
+      # Load S3 Bucket config.
+      list_of_models_version <- stringr::str_c("m0_m5_v5j_", c("arimaxg", "rf", "arimareg"))
+      
+      ## '--Step 4. Save Model ----
+      for (i in length(Crudev5jList)){#seq(1, length(Crudev5jList))){
+        ## Get Model of one forecastMonth
+        models_set <- Crudev5jList[[i]]
+        x <- length(date_range)
+        forecastMonth <- paste0(month.abb[month(date_range[x])], year(date_range[x]))
+        ## Save all 3 models version (e.g. rf, arimaxg, arimareg for Jan-19)
+        for (j in seq(1, length(list_of_models_version))){
+          model_to_save <- models_set [[j]]
+          ## Upload to Sagemaker output trained model 
+          uploadModelSM(model = model_to_save, CRUDE = CRUDE,
+                        model_dir = model_dir,
+                        model_version = list_of_models_version[j],
+                        forecastMonth =  forecastMonth)
+        }
+        
+      }
+      return (Crudev5jList)
+    }
+
+## Time Series Model Evaluation
+
+In this example, they model evaluation is done basis business domain knowledge. Business are particularly interested to know how well the model is at forecasting the point values, for each horizons. *Example, for each M+1 values that is being forecasted, how accurate is the 1-month ahead prediction with respect to the actual monthly average prices.*
+
+![Model evaluation](TSCV_MAE.jpg){width="607"}
+
+``` {.R}
+monthly_forecast <- calibration_tbl %>% 
+      mutate(year = year(DateTime), month = month(DateTime)) %>%
+      left_join(Crude, c("year", "month")) %>% 
+      group_by(year, month) %>% 
+      summarise_if(is.numeric, mean, na.rm= T) %>% 
+      ungroup() %>%  
+      mutate(Date = make_date(year, month, 1),
+             y_pred_hybrid = (y_pred_rf + y_pred_arima_xg) / 2,
+             y_pred_hybrid2 = (y_pred_bsttree + y_pred_arimareg) / 2,
+             y_pred_hybrid3 = (y_pred_arimareg + y_pred_svmpoly) / 2,
+             dev_rf = y_pred_rf - !!rlang::sym(crackCol),
+             dev_arima_xg = y_pred_arima_xg - !!rlang::sym(crackCol),
+             dev_hybrid = y_pred_hybrid - !!rlang::sym(crackCol),
+             dev_hybrid2 = y_pred_hybrid2 - !!rlang::sym(crackCol),
+             dev_hybrid3 = y_pred_hybrid3 - !!rlang::sym(crackCol),
+             dev_bsttree = y_pred_bsttree - !!rlang::sym(crackCol),
+             dev_arimareg = y_pred_arimareg - !!rlang::sym(crackCol),
+             dev_svmpoly = y_pred_svmpoly - !!rlang::sym(crackCol),
+             dev_glmnet = y_pred_glmnet - !!rlang::sym(crackCol),
+             Series = paste0("M", row_number()-1))%>% 
+      mutate_if(is.numeric, round, 2) %>% 
+      select(Date, year, month, !!rlang::sym(crackCol), Series, contains("y_pred"), contains("dev_")) 
+```
+
+Sample output for MAD
+
+![MAD](Sample%20Model%20evaluation.jpg)
